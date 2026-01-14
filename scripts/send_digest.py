@@ -126,25 +126,6 @@ def build_detail_url(href: str) -> str:
     return urljoin(BASE_URL, href)
 
 
-def fetch_detail(session: requests.Session, url: str) -> str:
-    """Fetch a detail page and return cleaned text content."""
-    print(f"[DEBUG] Fetching detail from: {url}")
-    resp = session.get(url, timeout=REQUEST_TIMEOUT)
-    print(f"[DEBUG] Detail page response status: {resp.status_code}")
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    for node in soup.select(
-        ".bbs_cont, .view_cnt, .board_view, .bd_content, .contents"
-    ):
-        text = node.get_text("\n", strip=True)
-        if text:
-            return text
-
-    body = soup.find("body")
-    return body.get_text("\n", strip=True) if body else ""
-
-
 def build_email_body(items: List[Dict[str, str]], fetched_at: datetime) -> str:
     lines: List[str] = []
     lines.append(f"경희대 장학 공지 (공통_/국제_, 최근 5일) {fetched_at:%Y-%m-%d %H:%M}")
@@ -160,12 +141,6 @@ def build_email_body(items: List[Dict[str, str]], fetched_at: datetime) -> str:
         if item.get("posted_at"):
             lines.append(f"등록일: {item['posted_at']}")
         lines.append(f"링크: {item['url']}")
-
-        detail = item.get("detail", "").strip()
-        if detail:
-            preview = detail if len(detail) <= 1200 else f"{detail[:1200]}..."
-            lines.append("내용 요약:")
-            lines.append(preview)
         lines.append("")
 
     return "\n".join(lines)
@@ -240,11 +215,6 @@ def main() -> None:
 
     print(f"[DEBUG] After date filter: {len(recent_items)} items (date parse errors: {date_parse_errors})")
     items = recent_items
-    for item in items:
-        try:
-            item["detail"] = fetch_detail(session, item["url"])
-        except Exception as exc:  # noqa: BLE001
-            item["detail"] = f"내용을 가져오지 못했습니다: {exc}"
 
     now = datetime.now(KST)
     subject = f"[경희대] 장학 공지 요약 ({now:%Y-%m-%d})"

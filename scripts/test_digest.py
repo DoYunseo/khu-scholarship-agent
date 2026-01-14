@@ -4,7 +4,7 @@ from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
 
-from send_digest import BASE_URL, CATEGORY_PREFIXES, fetch_detail, fetch_list
+from send_digest import BASE_URL, CATEGORY_PREFIXES, fetch_list
 
 
 def debug_table_structure() -> None:
@@ -122,29 +122,6 @@ def main() -> None:
     
     items = fetch_list(session)
     print(f"\n필터된 항목: {len(items)}건")
-
-    if not items:
-        print("\n⚠️ 필터된 항목이 없습니다!")
-        print("개발자 모드에서 확인할 사항:")
-        print("1. F12로 개발자 도구 열기")
-        print("2. Elements 탭에서 테이블 구조 확인")
-        print("3. tbody > tr > td 순서 확인 (번호, 카테고리, 제목, 첨부파일, 등록일)")
-        print("4. 카테고리가 있는 td의 인덱스(0부터 시작) 확인")
-        print("5. 카테고리 텍스트가 정확히 '공통_교외장학' 같은 형식인지 확인")
-        return
-
-    # 앞부분 몇 개만 상세를 확인해 본다.
-    sample = items[:3]
-    for idx, item in enumerate(sample, start=1):
-        print(f"\n[{idx}] {item['category']} - {item['title']}")
-        print(f"URL: {item['url']}")
-        try:
-            detail = fetch_detail(session, item["url"])
-            preview = detail if len(detail) <= 400 else detail[:400] + "..."
-            print("본문 미리보기:")
-            print(preview)
-        except Exception as exc:  # noqa: BLE001
-            print(f"본문 수집 실패: {exc}")
 
 
 if __name__ == "__main__":
