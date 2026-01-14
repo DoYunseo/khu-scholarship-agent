@@ -27,4 +27,7 @@ jobs:
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           SCHOLARSHIP_URL: ${{ secrets.SCHOLARSHIP_URL }}
-        run: python scripts/send_digest.py
+        run: |
+          python scripts/send_digest.py 2>&1 | tee send_digest_output.log
+          cat send_digest_output.log
+
