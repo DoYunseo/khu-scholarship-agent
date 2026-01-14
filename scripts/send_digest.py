@@ -22,7 +22,9 @@ KST = timezone(timedelta(hours=9))
 
 def fetch_list(session: requests.Session) -> List[Dict[str, str]]:
     """Fetch list page and filter rows matching desired categories."""
+    print(f"[DEBUG] Fetching list from: {BASE_URL}")
     resp = session.get(BASE_URL, timeout=REQUEST_TIMEOUT)
+    print(f"[DEBUG] List page response status: {resp.status_code}")
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
@@ -126,7 +128,9 @@ def build_detail_url(href: str) -> str:
 
 def fetch_detail(session: requests.Session, url: str) -> str:
     """Fetch a detail page and return cleaned text content."""
+    print(f"[DEBUG] Fetching detail from: {url}")
     resp = session.get(url, timeout=REQUEST_TIMEOUT)
+    print(f"[DEBUG] Detail page response status: {resp.status_code}")
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
