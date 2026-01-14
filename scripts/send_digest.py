@@ -1,7 +1,7 @@
 import os
 import smtplib
 import ssl
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from typing import List, Dict
 from urllib.parse import urljoin, urlparse, parse_qs
@@ -12,11 +12,12 @@ from bs4 import BeautifulSoup
 
 BASE_URL = os.getenv(
     "SCHOLARSHIP_URL",
-    "https://janghak.khu.ac.kr/janghak/user/bbs/BMSR00040/list.do",
+    "https://janghak.khu.ac.kr/janghak/user/bbs/BMSR00040/list.do?menuNo=12300032",
 )
 CATEGORY_PREFIXES = ("공통_", "국제_")
 REQUEST_TIMEOUT = 30
 DEFAULT_MENU_NO = "12300032"
+KST = timezone(timedelta(hours=9))
 
 
 def fetch_list(session: requests.Session) -> List[Dict[str, str]]:
@@ -25,8 +26,22 @@ def fetch_list(session: requests.Session) -> List[Dict[str, str]]:
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    rows = soup.select("#noticeTbody tr") or soup.select("table tbody tr")
+    # 여러 선택자 시도
+    rows = None
+    for selector in ["#noticeTbody tr", "table tbody tr", "tbody tr", ".board_list tbody tr"]:
+        found = soup.select(selector)
+        if found:
+            rows = found
+            print(f"[DEBUG] Using selector '{selector}': found {len(rows)} rows")
+            break
+    
+    if not rows:
+        print("[DEBUG] No rows found with any selector!")
+        return []
+    
+    print(f"[DEBUG] Processing {len(rows)} rows")
     items: List[Dict[str, str]] = []
+    skipped_categories = []
 
     for row in rows:
         # 헤더 행(th) 무시
@@ -38,21 +53,39 @@ def fetch_list(session: requests.Session) -> List[Dict[str, str]]:
             continue
 
         cells = row.find_all("td")
+        if not cells:
+            continue
 
         category = None
-        for selector in [".bbs_cate", ".board_cate", ".category"]:
-            node = row.select_one(selector)
-            if node:
-                category = node.get_text(strip=True)
-                break
-        # 테이블 구조: 0=번호, 1=카테고리인 경우가 많으므로 우선 1번 칸을 사용
-        if not category and len(cells) > 1:
-            category = cells[1].get_text(strip=True)
-        elif not category and cells:
-            category = cells[0].get_text(strip=True)
+        potential_category = None
+
+        # 1. 우선적으로 td[1]에서 카테고리 텍스트 추출 시도
+        if len(cells) > 1:
+            potential_category = cells[1].get_text(strip=True)
+            if potential_category and potential_category != "공지": # '공지'는 실제 카테고리가 아님
+                category = potential_category
+        
+        # 2. td[1]에서 유효한 카테고리를 찾지 못했다면, CSS 선택자로 찾기 시도
+        if not category:
+            for selector in [".bbs_cate", ".board_cate", ".category", "[class*='cate']"]:
+                node = row.select_one(selector)
+                if node:
+                    potential_category = node.get_text(strip=True)
+                    if potential_category and potential_category != "공지":
+                        category = potential_category
+                        break
+        
+        # 3. 여전히 카테고리를 찾지 못했다면, td[0]에서 최종 시도 (단, '공지'는 제외)
+        if not category and len(cells) > 0:
+            potential_category = cells[0].get_text(strip=True)
+            if potential_category and potential_category != "공지":
+                category = potential_category
+
         if not category:
             continue
-        if not category.startswith(CATEGORY_PREFIXES):
+        # 공통_ 또는 국제_로 시작하는지 확인
+        if not any(category.startswith(prefix) for prefix in CATEGORY_PREFIXES):
+            skipped_categories.append(category)
             continue
 
         title = link.get_text(strip=True)
@@ -68,6 +101,10 @@ def fetch_list(session: requests.Session) -> List[Dict[str, str]]:
             }
         )
 
+    print(f"[DEBUG] Filtered {len(items)} items matching 공통_/국제_")
+    if skipped_categories:
+        unique_skipped = set(skipped_categories)
+        print(f"[DEBUG] Skipped categories: {', '.join(sorted(unique_skipped)[:10])}")
     return items
 
 
@@ -106,11 +143,11 @@ def fetch_detail(session: requests.Session, url: str) -> str:
 
 def build_email_body(items: List[Dict[str, str]], fetched_at: datetime) -> str:
     lines: List[str] = []
-    lines.append(f"경희대 장학 공지 (공통_/국제_) {fetched_at:%Y-%m-%d %H:%M}")
+    lines.append(f"경희대 장학 공지 (공통_/국제_, 최근 5일) {fetched_at:%Y-%m-%d %H:%M}")
     lines.append(f"총 {len(items)}건\n")
 
     if not items:
-        lines.append("금일 신규로 확인된 공지가 없습니다.")
+        lines.append("최근 5일 이내 공통_/국제_ 카테고리 공지가 없습니다.")
         return "\n".join(lines)
 
     for idx, item in enumerate(items, start=1):
@@ -175,13 +212,37 @@ def main() -> None:
     })
 
     items = fetch_list(session)
+
+    # 최근 5일 이내 공지만 남기기 (KST 기준, 오늘 포함)
+    # 예: 오늘이 1월 15일이면 1월 11일~15일 (5일)
+    cutoff = datetime.now(KST).date() - timedelta(days=4)
+    print(f"[DEBUG] Date filter: including announcements from {cutoff} onwards")
+    recent_items: List[Dict[str, str]] = []
+    date_parse_errors = 0
+    for item in items:
+        date_str = (item.get("posted_at") or "").strip()
+        if not date_str:
+            # 날짜가 없으면 일단 포함
+            recent_items.append(item)
+            continue
+        try:
+            posted_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            if posted_date >= cutoff:
+                recent_items.append(item)
+        except ValueError:
+            # 날짜 파싱이 안 되면 일단 포함
+            date_parse_errors += 1
+            recent_items.append(item)
+
+    print(f"[DEBUG] After date filter: {len(recent_items)} items (date parse errors: {date_parse_errors})")
+    items = recent_items
     for item in items:
         try:
             item["detail"] = fetch_detail(session, item["url"])
         except Exception as exc:  # noqa: BLE001
             item["detail"] = f"내용을 가져오지 못했습니다: {exc}"
 
-    now = datetime.now()
+    now = datetime.now(KST)
     subject = f"[경희대] 장학 공지 요약 ({now:%Y-%m-%d})"
     body = build_email_body(items, fetched_at=now)
     send_email(body, subject)

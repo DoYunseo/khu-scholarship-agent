@@ -99,7 +99,7 @@ def debug_table_structure() -> None:
             print(f"  td[0]에서 찾은 카테고리: '{category}'")
         
         if category:
-            matches = category.startswith(CATEGORY_PREFIXES)
+            matches = any(category.startswith(prefix) for prefix in CATEGORY_PREFIXES)
             print(f"  필터 조건 ('공통_' 또는 '국제_'로 시작): {matches}")
         print()
 
