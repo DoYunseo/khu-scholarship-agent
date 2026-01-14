@@ -4,7 +4,7 @@ import ssl
 from datetime import datetime
 from email.message import EmailMessage
 from typing import List, Dict
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse, parse_qs
 
 import requests
 from bs4 import BeautifulSoup
@@ -16,6 +16,7 @@ BASE_URL = os.getenv(
 )
 CATEGORY_PREFIXES = ("공통_", "국제_")
 REQUEST_TIMEOUT = 30
+DEFAULT_MENU_NO = "12300032"
 
 
 def fetch_list(session: requests.Session) -> List[Dict[str, str]]:
@@ -40,7 +41,10 @@ def fetch_list(session: requests.Session) -> List[Dict[str, str]]:
             if node:
                 category = node.get_text(strip=True)
                 break
-        if not category and cells:
+        # 테이블 구조: 0=번호, 1=카테고리인 경우가 많으므로 우선 1번 칸을 사용
+        if not category and len(cells) > 1:
+            category = cells[1].get_text(strip=True)
+        elif not category and cells:
             category = cells[0].get_text(strip=True)
         if not category:
             continue
@@ -48,7 +52,7 @@ def fetch_list(session: requests.Session) -> List[Dict[str, str]]:
             continue
 
         title = link.get_text(strip=True)
-        url = urljoin(BASE_URL, link["href"])
+        url = build_detail_url(link.get("href", ""))
         posted_at = cells[-1].get_text(strip=True) if cells else ""
 
         items.append(
@@ -61,6 +65,22 @@ def fetch_list(session: requests.Session) -> List[Dict[str, str]]:
         )
 
     return items
+
+
+def build_detail_url(href: str) -> str:
+    """Convert a javascript:view('id') href to a real detail URL."""
+    href = (href or "").strip()
+    if href.startswith("javascript:view"):
+        article_id = "".join(ch for ch in href if ch.isdigit())
+        if article_id:
+            parsed = urlparse(BASE_URL)
+            qs = parse_qs(parsed.query)
+            menu_no = qs.get("menuNo", [DEFAULT_MENU_NO])[0]
+            base = BASE_URL.split("list.do")[0]
+            return f"{base}view.do?articleId={article_id}&menuNo={menu_no}"
+    if href.startswith("http"):
+        return href
+    return urljoin(BASE_URL, href)
 
 
 def fetch_detail(session: requests.Session, url: str) -> str:
