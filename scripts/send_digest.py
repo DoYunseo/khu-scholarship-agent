@@ -130,6 +130,7 @@ def build_email_body(items: List[Dict[str, str]], fetched_at: datetime) -> str:
     lines: List[str] = []
     lines.append(f"경희대 장학 공지 (공통_/국제_, 최근 5일) {fetched_at:%Y-%m-%d %H:%M}")
     lines.append(f"총 {len(items)}건\n")
+    lines.append(f"목록 바로가기: {BASE_URL}\n")
 
     if not items:
         lines.append("최근 5일 이내 공통_/국제_ 카테고리 공지가 없습니다.")
