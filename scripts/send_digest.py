@@ -25,10 +25,14 @@ def fetch_list(session: requests.Session) -> List[Dict[str, str]]:
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    rows = soup.select("table tbody tr")
+    rows = soup.select("#noticeTbody tr") or soup.select("table tbody tr")
     items: List[Dict[str, str]] = []
 
     for row in rows:
+        # 헤더 행(th) 무시
+        if row.find("th"):
+            continue
+
         link = row.find("a", href=True)
         if not link:
             continue
@@ -161,7 +165,14 @@ def send_email(body: str, subject: str) -> None:
 
 def main() -> None:
     session = requests.Session()
-    session.headers.update({"User-Agent": "khu-scholarship-agent/1.0"})
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    })
 
     items = fetch_list(session)
     for item in items:
