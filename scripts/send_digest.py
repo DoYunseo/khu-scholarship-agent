@@ -141,7 +141,6 @@ def build_email_body(items: List[Dict[str, str]], fetched_at: datetime) -> str:
         lines.append(f"카테고리: {item['category']}")
         if item.get("posted_at"):
             lines.append(f"등록일: {item['posted_at']}")
-        lines.append(f"링크: {item['url']}")
         lines.append("")
 
     return "\n".join(lines)
