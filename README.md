@@ -1,12 +1,12 @@
 # 경희대 장학 공지 에이전트
 
-경희대학교 미래혁신단 학생지원센터(장학)에 올라오는 공통_ 또는 국제_로 시작하는 최근 5일의 장학 카테고리 공지를 매일 08:55(한국시간)에 수집해 이메일로 보내는 GitHub Actions 워크플로우입니다.
+경희대학교 미래혁신단 학생지원센터(장학)에 올라오는 공통_ 또는 국제_로 시작하는 최근 5일의 장학 카테고리 공지를 매일 오전 9시경(한국시간)에 수집해 이메일로 보내는 GitHub Actions 워크플로우입니다.
 
 - 경희대학교 미래혁신단 학생지원센터(장학) 링크: https://janghak.khu.ac.kr/janghak/user/bbs/BMSR00040/list.do?menuNo=12300032
 
 ## 구성
 - `scripts/send_digest.py`: 공지 크롤링 및 이메일 발송 스크립트.
-- `.github/workflows/daily-digest.yml`: 매일 09:00 KST에 실행되는 스케줄러.
+- `.github/workflows/daily-digest.yml`: 매일 오전 9시경(한국시간)에 실행되는 스케줄러.
 - `requirements.txt`: Python 의존성 목록.
 
 ## 설정 방법
@@ -35,7 +35,7 @@
    - `EMAIL_IMAP_PORT` (선택): IMAP SSL 포트 (기본값 `993`)
    - `SCHOLARSHIP_URL` (선택): 기본 공지 URL을 변경하려면 설정 (현재 `https://janghak.khu.ac.kr/janghak/user/bbs/BMSR00040/list.do?menuNo=12300032`)
 
-3) 워크플로우가 `Asia/Seoul` 시간대 기준 매일 08:55에 실행됩니다. 다른 시간이 필요하면 `.github/workflows/daily-digest.yml`의 cron을 수정하세요.
+3) 워크플로우가 `Asia/Seoul` 시간대 기준 매일 오전 9시경에 실행됩니다. 다른 시간이 필요하면 `.github/workflows/daily-digest.yml`의 cron을 수정하세요.
 
 ## 로컬 테스트
 ```bash
