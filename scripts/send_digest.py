@@ -1,10 +1,18 @@
+import base64
+import hashlib
+import hmac
+import html
+import imaplib
 import os
+import re
 import smtplib
 import ssl
 from datetime import datetime, timedelta, timezone
+from email import message_from_bytes
+from email.header import decode_header, make_header
 from email.message import EmailMessage
-from typing import List, Dict
-from urllib.parse import urljoin, urlparse, parse_qs
+from typing import Dict, List, Optional, Set
+from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -18,6 +26,7 @@ CATEGORY_PREFIXES = ("공통_", "국제_")
 REQUEST_TIMEOUT = 30
 DEFAULT_MENU_NO = "12300032"
 KST = timezone(timedelta(hours=9))
+UNSUBSCRIBE_SUBJECT_PREFIX = "KHU-SCHOLARSHIP-UNSUBSCRIBE"
 
 
 def fetch_list(session: requests.Session) -> List[Dict[str, str]]:
@@ -146,6 +155,127 @@ def build_email_body(items: List[Dict[str, str]], fetched_at: datetime) -> str:
     return "\n".join(lines)
 
 
+def parse_recipients(*values: Optional[str]) -> List[str]:
+    """Parse, normalize, and deduplicate comma/semicolon separated recipients."""
+    recipients: List[str] = []
+    seen: Set[str] = set()
+    for value in values:
+        for recipient in re.split(r"[,;\n]", value or ""):
+            recipient = recipient.strip().lower()
+            if recipient and recipient not in seen:
+                seen.add(recipient)
+                recipients.append(recipient)
+    return recipients
+
+
+def create_unsubscribe_token(recipient: str, secret: str) -> str:
+    """Create a tamper-proof bearer token for one recipient."""
+    encoded_recipient = base64.urlsafe_b64encode(
+        recipient.strip().lower().encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    signature = hmac.new(
+        secret.encode("utf-8"), encoded_recipient.encode("ascii"), hashlib.sha256
+    ).digest()
+    encoded_signature = base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+    return f"{encoded_recipient}.{encoded_signature}"
+
+
+def recipient_from_unsubscribe_token(token: str, secret: str) -> Optional[str]:
+    """Return the recipient encoded in a valid unsubscribe token."""
+    try:
+        encoded_recipient, supplied_signature = token.strip().split(".", 1)
+        expected_signature = hmac.new(
+            secret.encode("utf-8"), encoded_recipient.encode("ascii"), hashlib.sha256
+        ).digest()
+        expected = base64.urlsafe_b64encode(expected_signature).decode("ascii").rstrip("=")
+        if not hmac.compare_digest(supplied_signature, expected):
+            return None
+        padding = "=" * (-len(encoded_recipient) % 4)
+        return base64.urlsafe_b64decode(encoded_recipient + padding).decode("utf-8").lower()
+    except (UnicodeDecodeError, ValueError):
+        return None
+
+
+def build_unsubscribe_url(sender: str, recipient: str, secret: str) -> str:
+    """Build a mailto unsubscribe URL understood by common email clients."""
+    token = create_unsubscribe_token(recipient, secret)
+    query = urlencode(
+        {
+            "subject": f"{UNSUBSCRIBE_SUBJECT_PREFIX} {token}",
+            "body": "이 메일을 그대로 보내면 경희대 장학 공지 메일 수신이 거부됩니다.",
+        }
+    )
+    return f"mailto:{quote(sender, safe='@')}?{query}"
+
+
+def build_html_body(body: str, unsubscribe_url: str) -> str:
+    """Create the HTML alternative with an unsubscribe button at the bottom."""
+    escaped_body = html.escape(body).replace("\n", "<br>\n")
+    escaped_url = html.escape(unsubscribe_url, quote=True)
+    return f"""<!doctype html>
+<html lang="ko">
+  <body style="font-family: Arial, 'Noto Sans KR', sans-serif; color: #202124; line-height: 1.6;">
+    <div>{escaped_body}</div>
+    <div style="margin-top: 32px; padding-top: 18px; border-top: 1px solid #dadce0; color: #5f6368; font-size: 12px;">
+      더 이상 이 안내를 받고 싶지 않다면 아래 버튼을 누른 뒤 수신 거부 메일을 보내 주세요.<br>
+      <a href="{escaped_url}" style="display: inline-block; margin-top: 10px; padding: 8px 14px; border: 1px solid #9aa0a6; border-radius: 4px; color: #5f6368; text-decoration: none;">수신 거부</a>
+    </div>
+  </body>
+</html>"""
+
+
+def infer_imap_host(smtp_host: str) -> str:
+    """Infer the common IMAP hostname while allowing an explicit override."""
+    if smtp_host.lower().startswith("smtp."):
+        return f"imap.{smtp_host[5:]}"
+    return smtp_host
+
+
+def find_unsubscribed_recipients(
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    secret: str,
+) -> Set[str]:
+    """Read signed unsubscribe requests from the sender's inbox."""
+    unsubscribed: Set[str] = set()
+    context = ssl.create_default_context()
+    with imaplib.IMAP4_SSL(host, port, ssl_context=context) as mailbox:
+        mailbox.login(username, password)
+        status, _ = mailbox.select("INBOX", readonly=True)
+        if status != "OK":
+            raise RuntimeError("Could not open the IMAP inbox")
+
+        status, data = mailbox.search(
+            None, "HEADER", "Subject", f'"{UNSUBSCRIBE_SUBJECT_PREFIX}"'
+        )
+        if status != "OK":
+            raise RuntimeError("Could not search for unsubscribe requests")
+
+        for message_id in data[0].split():
+            status, parts = mailbox.fetch(message_id, "(BODY.PEEK[HEADER.FIELDS (SUBJECT)])")
+            if status != "OK":
+                continue
+            header_bytes = next(
+                (part[1] for part in parts if isinstance(part, tuple) and part[1]), None
+            )
+            if not header_bytes:
+                continue
+            message = message_from_bytes(header_bytes)
+            subject = str(make_header(decode_header(message.get("Subject", ""))))
+            match = re.search(
+                rf"{re.escape(UNSUBSCRIBE_SUBJECT_PREFIX)}\s+([^\s]+)", subject
+            )
+            if not match:
+                continue
+            recipient = recipient_from_unsubscribe_token(match.group(1), secret)
+            if recipient:
+                unsubscribed.add(recipient)
+
+    return unsubscribed
+
+
 def send_email(body: str, subject: str) -> None:
     required_env = [
         "EMAIL_HOST",
@@ -154,6 +284,7 @@ def send_email(body: str, subject: str) -> None:
         "EMAIL_PASSWORD",
         "EMAIL_FROM",
         "EMAIL_TO",
+        "EMAIL_UNSUBSCRIBE_SECRET",
     ]
     missing = [key for key in required_env if not os.getenv(key)]
     if missing:
@@ -164,19 +295,44 @@ def send_email(body: str, subject: str) -> None:
     username = os.environ["EMAIL_USERNAME"]
     password = os.environ["EMAIL_PASSWORD"]
     sender = os.environ["EMAIL_FROM"]
-    recipient = os.environ["EMAIL_TO"]
+    secret = os.environ["EMAIL_UNSUBSCRIBE_SECRET"]
+    recipients = parse_recipients(
+        os.environ["EMAIL_TO"], os.getenv("EMAIL_TO_ADDITIONAL")
+    )
+    if not recipients:
+        raise RuntimeError("No email recipients configured")
 
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = sender
-    msg["To"] = recipient
-    msg.set_content(body)
+    imap_host = os.getenv("EMAIL_IMAP_HOST") or infer_imap_host(host)
+    imap_port = int(os.getenv("EMAIL_IMAP_PORT") or "993")
+    unsubscribed = find_unsubscribed_recipients(
+        imap_host, imap_port, username, password, secret
+    )
+    active_recipients = [item for item in recipients if item not in unsubscribed]
+    print(
+        f"[INFO] Recipients: {len(recipients)}, "
+        f"unsubscribed: {len(recipients) - len(active_recipients)}, "
+        f"sending: {len(active_recipients)}"
+    )
+    if not active_recipients:
+        return
 
     context = ssl.create_default_context()
     with smtplib.SMTP(host, port) as smtp:
         smtp.starttls(context=context)
         smtp.login(username, password)
-        smtp.send_message(msg)
+        for recipient in active_recipients:
+            unsubscribe_url = build_unsubscribe_url(sender, recipient, secret)
+            msg = EmailMessage()
+            msg["Subject"] = subject
+            msg["From"] = sender
+            msg["To"] = recipient
+            msg["List-Unsubscribe"] = f"<{unsubscribe_url}>"
+            msg.set_content(
+                f"{body}\n\n---\n수신 거부: {unsubscribe_url}\n"
+                "링크를 연 뒤 수신 거부 메일을 보내 주세요. 다음 발송부터 제외됩니다."
+            )
+            msg.add_alternative(build_html_body(body, unsubscribe_url), subtype="html")
+            smtp.send_message(msg)
 
 
 def main() -> None:
