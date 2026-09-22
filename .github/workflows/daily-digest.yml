@@ -2,7 +2,8 @@ name: Daily Scholarship Digest
 
 on:
   schedule:
-    - cron: "0 0 * * *" # 09:00 KST (UTC+9)
+    - cron: "55 8 * * *"
+      timezone: Asia/Seoul
   workflow_dispatch:
 
 jobs:
