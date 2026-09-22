@@ -168,6 +168,28 @@ def parse_recipients(*values: Optional[str]) -> List[str]:
     return recipients
 
 
+def build_recipient_entries(
+    primary: Optional[str], additional: Optional[str]
+) -> List[Dict[str, str]]:
+    """Build privacy-safe labels for recipients without exposing addresses in logs."""
+    entries: List[Dict[str, str]] = []
+    seen: Set[str] = set()
+    for group_label, value in (
+        ("기본 수신자", primary),
+        ("추가 수신자", additional),
+    ):
+        group_index = 0
+        for recipient in parse_recipients(value):
+            if recipient in seen:
+                continue
+            seen.add(recipient)
+            group_index += 1
+            entries.append(
+                {"address": recipient, "label": f"{group_label} {group_index}"}
+            )
+    return entries
+
+
 def create_unsubscribe_token(recipient: str, secret: str) -> str:
     """Create a tamper-proof bearer token for one recipient."""
     encoded_recipient = base64.urlsafe_b64encode(
@@ -276,7 +298,23 @@ def find_unsubscribed_recipients(
     return unsubscribed
 
 
-def send_email(body: str, subject: str) -> None:
+def write_delivery_summary(results: List[Dict[str, str]]) -> None:
+    """Append a per-recipient delivery table to the GitHub Actions run summary."""
+    summary_path = os.getenv("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return
+    with open(summary_path, "a", encoding="utf-8") as summary:
+        summary.write("## 이메일 발송 결과\n\n")
+        summary.write("| 수신자 | 상태 | 설명 |\n")
+        summary.write("|---|---|---|\n")
+        for result in results:
+            label = result["label"].replace("|", "\\|")
+            status = result["status"].replace("|", "\\|")
+            detail = result["detail"].replace("|", "\\|")
+            summary.write(f"| {label} | {status} | {detail} |\n")
+
+
+def send_email(body: str, subject: str) -> List[Dict[str, str]]:
     required_env = [
         "EMAIL_HOST",
         "EMAIL_PORT",
@@ -296,10 +334,10 @@ def send_email(body: str, subject: str) -> None:
     password = os.environ["EMAIL_PASSWORD"]
     sender = os.environ["EMAIL_FROM"]
     secret = os.environ["EMAIL_UNSUBSCRIBE_SECRET"]
-    recipients = parse_recipients(
+    recipient_entries = build_recipient_entries(
         os.environ["EMAIL_TO"], os.getenv("EMAIL_TO_ADDITIONAL")
     )
-    if not recipients:
+    if not recipient_entries:
         raise RuntimeError("No email recipients configured")
 
     imap_host = os.getenv("EMAIL_IMAP_HOST") or infer_imap_host(host)
@@ -307,32 +345,90 @@ def send_email(body: str, subject: str) -> None:
     unsubscribed = find_unsubscribed_recipients(
         imap_host, imap_port, username, password, secret
     )
-    active_recipients = [item for item in recipients if item not in unsubscribed]
+    active_entries = [
+        entry for entry in recipient_entries if entry["address"] not in unsubscribed
+    ]
     print(
-        f"[INFO] Recipients: {len(recipients)}, "
-        f"unsubscribed: {len(recipients) - len(active_recipients)}, "
-        f"sending: {len(active_recipients)}"
+        f"[INFO] Recipients: {len(recipient_entries)}, "
+        f"unsubscribed: {len(recipient_entries) - len(active_entries)}, "
+        f"sending: {len(active_entries)}"
     )
-    if not active_recipients:
-        return
+
+    results_by_address: Dict[str, Dict[str, str]] = {}
+    for entry in recipient_entries:
+        if entry["address"] in unsubscribed:
+            results_by_address[entry["address"]] = {
+                "label": entry["label"],
+                "status": "⏭️ 제외",
+                "detail": "수신 거부 요청에 따라 발송하지 않음",
+            }
+            print(f"[DELIVERY] {entry['label']}: SKIPPED (unsubscribed)")
+
+    if not active_entries:
+        results = [results_by_address[entry["address"]] for entry in recipient_entries]
+        write_delivery_summary(results)
+        return results
 
     context = ssl.create_default_context()
-    with smtplib.SMTP(host, port) as smtp:
-        smtp.starttls(context=context)
-        smtp.login(username, password)
-        for recipient in active_recipients:
-            unsubscribe_url = build_unsubscribe_url(sender, recipient, secret)
-            msg = EmailMessage()
-            msg["Subject"] = subject
-            msg["From"] = sender
-            msg["To"] = recipient
-            msg["List-Unsubscribe"] = f"<{unsubscribe_url}>"
-            msg.set_content(
-                f"{body}\n\n---\n수신 거부: {unsubscribe_url}\n"
-                "링크를 연 뒤 수신 거부 메일을 보내 주세요. 다음 발송부터 제외됩니다."
-            )
-            msg.add_alternative(build_html_body(body, unsubscribe_url), subtype="html")
-            smtp.send_message(msg)
+    try:
+        with smtplib.SMTP(host, port) as smtp:
+            smtp.starttls(context=context)
+            smtp.login(username, password)
+            for entry in active_entries:
+                recipient = entry["address"]
+                unsubscribe_url = build_unsubscribe_url(sender, recipient, secret)
+                msg = EmailMessage()
+                msg["Subject"] = subject
+                msg["From"] = sender
+                msg["To"] = recipient
+                msg["List-Unsubscribe"] = f"<{unsubscribe_url}>"
+                msg.set_content(
+                    f"{body}\n\n---\n수신 거부: {unsubscribe_url}\n"
+                    "링크를 연 뒤 수신 거부 메일을 보내 주세요. 다음 발송부터 제외됩니다."
+                )
+                msg.add_alternative(build_html_body(body, unsubscribe_url), subtype="html")
+                try:
+                    refused = smtp.send_message(msg)
+                    if refused:
+                        raise smtplib.SMTPRecipientsRefused(refused)
+                    results_by_address[recipient] = {
+                        "label": entry["label"],
+                        "status": "✅ 성공",
+                        "detail": "SMTP 서버 접수 완료",
+                    }
+                    print(f"[DELIVERY] {entry['label']}: SUCCESS (SMTP accepted)")
+                except smtplib.SMTPException as exc:
+                    results_by_address[recipient] = {
+                        "label": entry["label"],
+                        "status": "❌ 실패",
+                        "detail": f"SMTP 오류 ({type(exc).__name__})",
+                    }
+                    print(
+                        f"[DELIVERY] {entry['label']}: FAILED "
+                        f"({type(exc).__name__})"
+                    )
+    except (OSError, smtplib.SMTPException, ssl.SSLError) as exc:
+        for entry in active_entries:
+            if entry["address"] not in results_by_address:
+                results_by_address[entry["address"]] = {
+                    "label": entry["label"],
+                    "status": "❌ 실패",
+                    "detail": f"SMTP 연결 오류 ({type(exc).__name__})",
+                }
+                print(
+                    f"[DELIVERY] {entry['label']}: FAILED "
+                    f"({type(exc).__name__})"
+                )
+
+    results = [results_by_address[entry["address"]] for entry in recipient_entries]
+    write_delivery_summary(results)
+    failed_labels = [result["label"] for result in results if "실패" in result["status"]]
+    if failed_labels:
+        raise RuntimeError(
+            f"Email delivery failed for {len(failed_labels)} recipient(s): "
+            + ", ".join(failed_labels)
+        )
+    return results
 
 
 def main() -> None:
